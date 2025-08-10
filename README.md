@@ -1,5 +1,6 @@
 # AutoCourseGrabber
 A AutoCourseGrabber for a university  
+喜欢的话能不能点亮右上角的小星星喵~
 
 This is a beta version, so it maybe have many bugs. Please raise the issue on this respository.   
 这是Beta版本，所以可能不稳定，请在Issue板块提交Bug说明。
