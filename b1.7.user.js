@@ -2,7 +2,7 @@
 // @name         Cppu选课助手
 // @namespace    http://tampermonkey.net/
 // @version      b1.7
-// @description  中国人民警察大学选课助手，带免责声明
+// @description  Cppu选课助手
 // @author       ljnljn
 // @match        http://jw.cppu.edu.cn/*
 // @match        https://jw.cppu.edu.cn/*
