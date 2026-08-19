@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cppu选课助手
 // @namespace    http://tampermonkey.net/
-// @version      b1.16
+// @version      b1.17
 // @description  cppu选课助手（支持 WebVPN：webvpn.cppu.edu.cn）
 // @author       ljnljn
 // @match        http://jw.cppu.edu.cn/*
@@ -12,6 +12,8 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_notification
+// @grant        GM_xmlhttpRequest
+// @connect      qyapi.weixin.qq.com
 // ==/UserScript==
 
 (function() {
@@ -460,7 +462,7 @@
         // 检查用户是否已经确认过免责声明
         const disclaimerAccepted = GM_getValue('disclaimerAccepted', false);
         const acceptedVersion = GM_getValue('disclaimerVersion', '');
-        const currentVersion = 'b1.16';
+        const currentVersion = 'b1.17';
 
         // 如果用户已经接受过当前版本的免责声明，直接返回
         if (disclaimerAccepted && acceptedVersion === currentVersion) {
@@ -554,7 +556,7 @@
         controlPanel.id = 'police-course-control';
         controlPanel.innerHTML = `
                 <div class="control-header">
-                <span>选课助手-版本b1.16</span>
+                <span>选课助手-版本b1.17</span>
                 <button class="close-btn" id="close-btn">×</button>
             </div>
             <div class="control-buttons">
@@ -572,6 +574,11 @@
                 <div class="setting-item">
                     <label for="click-delay">点击间隔 (毫秒)</label>
                     <input type="number" id="click-delay" min="100" value="500">
+                </div>
+                <div class="setting-item">
+                    <label for="wecom-webhook">企业微信群机器人 Webhook（留空=不推送）</label>
+                    <input type="text" id="wecom-webhook" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx">
+                    <div class="filter-hint">抢课成功时自动推送消息到企业微信群。获取方法：企业微信群 → 右上角 → 群机器人 → 添加 → 复制 Webhook 地址。</div>
                 </div>
                 <button id="save-settings" class="save-settings">保存设置</button>
             </div>
@@ -718,21 +725,55 @@
     function loadSettings() {
         const refreshInterval = GM_getValue('refreshInterval', 30);
         const clickDelay = GM_getValue('clickDelay', 500);
+        const wecomWebhook = GM_getValue('wecomWebhook', '');
 
         document.getElementById('refresh-interval').value = refreshInterval;
         document.getElementById('click-delay').value = clickDelay;
+        document.getElementById('wecom-webhook').value = wecomWebhook;
     }
 
     // 保存设置
     function saveSettings() {
         const refreshInterval = parseInt(document.getElementById('refresh-interval').value);
         const clickDelay = parseInt(document.getElementById('click-delay').value);
+        const wecomWebhook = document.getElementById('wecom-webhook').value.trim();
 
         GM_setValue('refreshInterval', refreshInterval);
         GM_setValue('clickDelay', clickDelay);
+        GM_setValue('wecomWebhook', wecomWebhook);
 
         addLog('设置已保存', 'success');
         toggleSettingsPanel();
+    }
+
+    // 推送消息到企业微信群（群机器人 Webhook，HTTP 方式；需已配置 webhook 地址）
+    function pushWecomMessage(text) {
+        const url = GM_getValue('wecomWebhook', '').trim();
+        if (!url) return false;
+        try {
+            if (typeof GM_xmlhttpRequest === 'undefined') {
+                addLog('推送失败: 当前环境不支持 GM_xmlhttpRequest', 'error');
+                return false;
+            }
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: url,
+                headers: { 'Content-Type': 'application/json' },
+                data: JSON.stringify({ msgtype: 'text', text: { content: text } }),
+                timeout: 5000,
+                onload: function(res) {
+                    let ok = false;
+                    try { ok = res.status === 200 && res.responseText && res.responseText.indexOf('"errcode":0') >= 0; } catch (e) {}
+                    addLog('企业微信推送: ' + (ok ? '成功' : ('HTTP ' + res.status + ' ' + String(res.responseText || '').slice(0, 100))), ok ? 'success' : 'warning');
+                },
+                onerror: function() { addLog('企业微信推送失败（网络错误）', 'error'); },
+                ontimeout: function() { addLog('企业微信推送超时', 'error'); }
+            });
+            return true;
+        } catch (e) {
+            addLog('企业微信推送异常: ' + (e && e.message ? e.message : e), 'error');
+            return false;
+        }
     }
 
     // 切换收藏与筛选面板显示
@@ -1647,6 +1688,7 @@
     // 解析消息Promise
     function resolveMessagePromise() {
         if (messageResolver) {
+            if (messagePromise) messagePromise._resolved = true; // 标记真实成功（区分超时）
             messageResolver();
             messageResolver = null;
             messagePromise = null;
@@ -1764,6 +1806,12 @@
                 ]);
                 addLog(`${label} 选课操作已完成`, 'success');
                 updateMessageMonitor('已操作');
+
+                // 确认真实选课成功（收到页面"选课成功"消息）后推送企业微信通知
+                if (messagePromise._resolved) {
+                    const nowStr = new Date().toLocaleString('zh-CN', { hour12: false });
+                    pushWecomMessage(`【抢课成功】${label}\n课程模块：${c.kcmk}\n课程属性：${c.kcsx}\n选课课号：${c.xkkh}\n时间：${nowStr}`);
+                }
             } catch (error) {
                 addLog(`${label} 选课可能未成功`, 'warning');
             }
