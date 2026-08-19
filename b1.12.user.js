@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cppu选课助手
 // @namespace    http://tampermonkey.net/
-// @version      b1.11
+// @version      b1.12
 // @description  cppu选课助手
 // @author       ljnljn
 // @match        http://jw.cppu.edu.cn/*
@@ -426,7 +426,7 @@
         // 检查用户是否已经确认过免责声明
         const disclaimerAccepted = GM_getValue('disclaimerAccepted', false);
         const acceptedVersion = GM_getValue('disclaimerVersion', '');
-        const currentVersion = 'b1.11';
+        const currentVersion = 'b1.12';
 
         // 如果用户已经接受过当前版本的免责声明，直接返回
         if (disclaimerAccepted && acceptedVersion === currentVersion) {
@@ -520,7 +520,7 @@
         controlPanel.id = 'police-course-control';
         controlPanel.innerHTML = `
                 <div class="control-header">
-                <span>选课助手-版本b1.11</span>
+                <span>选课助手-版本b1.12</span>
                 <button class="close-btn" id="close-btn">×</button>
             </div>
             <div class="control-buttons">
@@ -910,18 +910,17 @@
             script.type = 'text/javascript';
             script.textContent = `(function(){
                 var post = function(type, text, level){ try { window.postMessage({source:'CPPU_WS_BRIDGE', type:type, text:text, level:level||'info'}, '*'); } catch(e){} };
-                var STALL_GIVEUP = 15000;   // engine 已 closed 且本地不再重连 -> 快速干预
-                var STALL_HUNG   = 60000;   // 连接卡在 opening / 重连中无进展 -> 慢速干预
-                var FORCE_MS     = 30000;   // 强制重连后仍不恢复 -> 刷新页面
-                var RELOAD_LIMIT = 3, RELOAD_WINDOW = 10*60*1000;
-                var stallStart = {}, forcedAt = {}, lastState = {}, notified = {}, seenIo = false;
+                var STALL_GIVEUP = 15000;       // engine 已 closed 且本地不再重连 -> 快速干预
+                var STALL_HUNG   = 60000;       // 连接卡在 opening / 重连中无进展 -> 慢速干预
+                var RETRY_MS     = 30000;       // 强制重连的重复重试间隔
+                var NOTIFY_MS    = 5*60*1000;   // 长时间未恢复时的提醒间隔
+                var stallStart = {}, lastForceAt = {}, lastState = {}, lastNotifyAt = {};
 
                 function healthList() {
                     var out = [];
                     try {
                         var io = window.io;
                         if (io && io.managers) {
-                            seenIo = true;
                             Object.keys(io.managers).forEach(function(uri){
                                 var m = io.managers[uri];
                                 var h = {uri: uri, m: m, engineReady: null, reconnecting: null, socketCount: 0, allSocketsDisconnected: false};
@@ -952,26 +951,22 @@
                 }
 
                 function forceOpen(m) {
-                    try { if (m.engine && m.engine.close) m.engine.close(); } catch(e){}
+                    // 深度重建：先销毁卡死的 transport 与 engine，再重新 open。绝不刷新页面
+                    try {
+                        var eng = m && m.engine;
+                        if (eng && eng.transports) {
+                            Object.keys(eng.transports).forEach(function(k){
+                                try { var t = eng.transports[k]; if (t && t.close) t.close(); } catch(e){}
+                            });
+                        }
+                        if (eng && eng.close) eng.close();
+                    } catch(e){}
                     try { if (m.open) m.open(); } catch(e){}
                     try { if (m.reconnect) m.reconnect(); } catch(e){}
                     try {
-                        var ss = m.sockets ? Object.keys(m.sockets) : [];
+                        var ss = m && m.sockets ? Object.keys(m.sockets) : [];
                         ss.forEach(function(ns){ try { m.sockets[ns].connect && m.sockets[ns].connect(); } catch(e){} });
                     } catch(e){}
-                }
-
-                function canReload() {
-                    try {
-                        var n = parseInt(sessionStorage.getItem('cppu_ws_reload_count') || '0', 10);
-                        var t = parseInt(sessionStorage.getItem('cppu_ws_reload_time') || '0', 10);
-                        var now = Date.now();
-                        if (now - t > RELOAD_WINDOW) { sessionStorage.setItem('cppu_ws_reload_count', '0'); sessionStorage.setItem('cppu_ws_reload_time', String(now)); n = 0; }
-                        if (n >= RELOAD_LIMIT) return false;
-                        sessionStorage.setItem('cppu_ws_reload_count', String(n + 1));
-                        sessionStorage.setItem('cppu_ws_reload_time', String(now));
-                        return true;
-                    } catch(e){ return true; }
                 }
 
                 setInterval(function(){
@@ -982,7 +977,7 @@
                         hs.forEach(function(h){
                             var uri = h.uri;
                             if (isHealthy(h)) {
-                                stallStart[uri] = null; forcedAt[uri] = null; notified[uri] = false;
+                                stallStart[uri] = null; lastForceAt[uri] = null; lastNotifyAt[uri] = null;
                                 if (lastState[uri] !== 'healthy') post('ws_status', 'socket.io 连接正常: ' + uri, 'success');
                                 lastState[uri] = 'healthy';
                                 return;
@@ -993,22 +988,18 @@
 
                             if (!stallStart[uri]) stallStart[uri] = now;
                             var stallMs = (h.engineReady === 'closed' && !h.reconnecting) ? STALL_GIVEUP : STALL_HUNG;
+                            var sinceStall = now - stallStart[uri];
 
-                            // 阶段1：本地未自行恢复 -> 尝试强制重连
-                            if (!forcedAt[uri] && (now - stallStart[uri]) >= stallMs) {
-                                forcedAt[uri] = now;
-                                post('ws_status', '本地未自动重连，尝试强制重连: ' + uri, 'warning');
+                            // 强制重连（可重复）：卡住超过阈值后，每隔 RETRY_MS 持续深度重试，直到恢复
+                            if (sinceStall >= stallMs && (lastForceAt[uri] == null || now - lastForceAt[uri] >= RETRY_MS)) {
+                                lastForceAt[uri] = now;
+                                post('ws_status', '本地未自动恢复，正在深度强制重连: ' + uri, 'warning');
                                 forceOpen(h.m);
                             }
-                            // 阶段2：强制重连仍不恢复 -> 刷新页面重建连接
-                            if (forcedAt[uri] && (now - forcedAt[uri]) >= FORCE_MS) {
-                                if (canReload()) {
-                                    post('ws_status', '强制重连无效，刷新页面以重建连接: ' + uri, 'error');
-                                    try { window.location.reload(); } catch(e){}
-                                } else if (!notified[uri]) {
-                                    notified[uri] = true;
-                                    post('ws_status', '自动刷新次数已达上限，请手动刷新页面恢复连接', 'error');
-                                }
+                            // 长时间未恢复 -> 仅提醒，绝不自动刷新页面（避免打断抢课流程）
+                            if (sinceStall >= NOTIFY_MS && (lastNotifyAt[uri] == null || now - lastNotifyAt[uri] >= NOTIFY_MS)) {
+                                lastNotifyAt[uri] = now;
+                                post('ws_status', '连接长时间未恢复，请稍后手动刷新页面彻底重建连接（脚本不会自动刷新页面）', 'error');
                             }
                         });
                     } catch(e){ post('ws_status', 'WebSocket 监控异常: ' + (e && e.message ? e.message : e), 'error'); }
@@ -1031,7 +1022,7 @@
                     }
                 } catch(e){}
 
-                post('ws_status', 'WebSocket/socket.io 断线监控已启动', 'info');
+                post('ws_status', 'WebSocket/socket.io 断线监控已启动（仅深度重连，不刷新页面）', 'info');
             })();`;
             document.documentElement.appendChild(script);
             script.parentNode.removeChild(script);
