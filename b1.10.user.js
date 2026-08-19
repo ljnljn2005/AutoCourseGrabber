@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cppu选课助手
 // @namespace    http://tampermonkey.net/
-// @version      b1.10
+// @version      b1.11
 // @description  cppu选课助手
 // @author       ljnljn
 // @match        http://jw.cppu.edu.cn/*
@@ -340,6 +340,85 @@
             border: 1px solid #f5c6cb;
             border-radius: 4px;
         }
+
+        /* 开始抢课前筛选确认弹窗 */
+        #filter-confirm-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 2147483647;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: Arial, sans-serif;
+        }
+
+        .filter-confirm-content {
+            background: white;
+            border-radius: 10px;
+            width: 460px;
+            max-width: 92%;
+            padding: 25px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+
+        .filter-confirm-title {
+            font-size: 20px;
+            font-weight: bold;
+            color: #c0392b;
+            text-align: center;
+            margin-bottom: 12px;
+        }
+
+        .filter-confirm-body {
+            font-size: 14px;
+            line-height: 1.7;
+            color: #333;
+        }
+
+        .filter-confirm-item {
+            margin: 12px 0;
+            padding: 10px 12px;
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 6px;
+        }
+
+        .filter-confirm-item label {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            color: #2c3e50;
+        }
+
+        .filter-confirm-item input[type=checkbox] {
+            margin-top: 3px;
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+
+        .filter-confirm-note {
+            font-size: 12px;
+            color: #856404;
+            background: #fff3cd;
+            border: 1px solid #ffeeba;
+            border-radius: 4px;
+            padding: 8px;
+            margin: 10px 0;
+        }
+
+        .filter-confirm-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 20px;
+        }
     `);
 
     // 显示免责声明弹窗
@@ -347,7 +426,7 @@
         // 检查用户是否已经确认过免责声明
         const disclaimerAccepted = GM_getValue('disclaimerAccepted', false);
         const acceptedVersion = GM_getValue('disclaimerVersion', '');
-        const currentVersion = 'b1.10';
+        const currentVersion = 'b1.11';
 
         // 如果用户已经接受过当前版本的免责声明，直接返回
         if (disclaimerAccepted && acceptedVersion === currentVersion) {
@@ -421,12 +500,14 @@
         startLogAutoClear();
         // 注入页面上下文的 console 捕获桥接
         injectConsoleBridge();
+        // 注入页面上下文的 WebSocket/socket.io 断线监控与强制重连
+        injectWsBridge();
         // 同时尝试在 userscript 沙箱层面做一次捕获（兼容不同环境）
         startConsoleCapture();
         // 等待3秒后检查是否自动启动
         setTimeout(() => {
             if (GM_getValue('autoSelectRunning', false)) {
-                startAutoSelection();
+                startAutoSelection({ skipConfirm: true });
             } else {
                 addLog('系统已就绪，点击"开始选课"按钮启动流程', 'info');
             }
@@ -439,7 +520,7 @@
         controlPanel.id = 'police-course-control';
         controlPanel.innerHTML = `
                 <div class="control-header">
-                <span>选课助手-版本b1.10</span>
+                <span>选课助手-版本b1.11</span>
                 <button class="close-btn" id="close-btn">×</button>
             </div>
             <div class="control-buttons">
@@ -496,7 +577,7 @@
 
         // 检查是否之前已启动
         if (GM_getValue('autoSelectRunning', false)) {
-            startAutoSelection();
+            startAutoSelection({ skipConfirm: true });
         }
     }
 
@@ -821,6 +902,160 @@
         }
     }
 
+    // 注入页面上下文：socket.io/WebSocket 断线监控与强制重连
+    // 当连接断开且页面自身不重新发送时：先尝试强制重连，仍失败则刷新页面重建连接
+    function injectWsBridge() {
+        try {
+            const script = document.createElement('script');
+            script.type = 'text/javascript';
+            script.textContent = `(function(){
+                var post = function(type, text, level){ try { window.postMessage({source:'CPPU_WS_BRIDGE', type:type, text:text, level:level||'info'}, '*'); } catch(e){} };
+                var STALL_GIVEUP = 15000;   // engine 已 closed 且本地不再重连 -> 快速干预
+                var STALL_HUNG   = 60000;   // 连接卡在 opening / 重连中无进展 -> 慢速干预
+                var FORCE_MS     = 30000;   // 强制重连后仍不恢复 -> 刷新页面
+                var RELOAD_LIMIT = 3, RELOAD_WINDOW = 10*60*1000;
+                var stallStart = {}, forcedAt = {}, lastState = {}, notified = {}, seenIo = false;
+
+                function healthList() {
+                    var out = [];
+                    try {
+                        var io = window.io;
+                        if (io && io.managers) {
+                            seenIo = true;
+                            Object.keys(io.managers).forEach(function(uri){
+                                var m = io.managers[uri];
+                                var h = {uri: uri, m: m, engineReady: null, reconnecting: null, socketCount: 0, allSocketsDisconnected: false};
+                                try { h.engineReady = (m.engine && m.engine.readyState) ? m.engine.readyState : null; } catch(e){}
+                                try { h.reconnecting = !!m.reconnecting; } catch(e){}
+                                try {
+                                    if (m.sockets) {
+                                        var ns = Object.keys(m.sockets);
+                                        h.socketCount = ns.length;
+                                        if (ns.length > 0) {
+                                            var anyConnected = false;
+                                            ns.forEach(function(n){ try { if (m.sockets[n].connected) anyConnected = true; } catch(e){} });
+                                            h.allSocketsDisconnected = !anyConnected;
+                                        }
+                                    }
+                                } catch(e){}
+                                out.push(h);
+                            });
+                        }
+                    } catch(e){}
+                    return out;
+                }
+
+                function isHealthy(h) {
+                    if (h.engineReady !== 'open') return false;
+                    if (h.allSocketsDisconnected) return false;
+                    return true;
+                }
+
+                function forceOpen(m) {
+                    try { if (m.engine && m.engine.close) m.engine.close(); } catch(e){}
+                    try { if (m.open) m.open(); } catch(e){}
+                    try { if (m.reconnect) m.reconnect(); } catch(e){}
+                    try {
+                        var ss = m.sockets ? Object.keys(m.sockets) : [];
+                        ss.forEach(function(ns){ try { m.sockets[ns].connect && m.sockets[ns].connect(); } catch(e){} });
+                    } catch(e){}
+                }
+
+                function canReload() {
+                    try {
+                        var n = parseInt(sessionStorage.getItem('cppu_ws_reload_count') || '0', 10);
+                        var t = parseInt(sessionStorage.getItem('cppu_ws_reload_time') || '0', 10);
+                        var now = Date.now();
+                        if (now - t > RELOAD_WINDOW) { sessionStorage.setItem('cppu_ws_reload_count', '0'); sessionStorage.setItem('cppu_ws_reload_time', String(now)); n = 0; }
+                        if (n >= RELOAD_LIMIT) return false;
+                        sessionStorage.setItem('cppu_ws_reload_count', String(n + 1));
+                        sessionStorage.setItem('cppu_ws_reload_time', String(now));
+                        return true;
+                    } catch(e){ return true; }
+                }
+
+                setInterval(function(){
+                    try {
+                        var hs = healthList();
+                        if (hs.length === 0) { return; }   // socket.io 未加载或无连接，暂不干预
+                        var now = Date.now();
+                        hs.forEach(function(h){
+                            var uri = h.uri;
+                            if (isHealthy(h)) {
+                                stallStart[uri] = null; forcedAt[uri] = null; notified[uri] = false;
+                                if (lastState[uri] !== 'healthy') post('ws_status', 'socket.io 连接正常: ' + uri, 'success');
+                                lastState[uri] = 'healthy';
+                                return;
+                            }
+                            // 连接断开/异常
+                            if (lastState[uri] !== 'unhealthy') post('ws_status', '检测到连接断开/异常: ' + uri + ' (state=' + h.engineReady + ', 重连中=' + h.reconnecting + ')', 'warning');
+                            lastState[uri] = 'unhealthy';
+
+                            if (!stallStart[uri]) stallStart[uri] = now;
+                            var stallMs = (h.engineReady === 'closed' && !h.reconnecting) ? STALL_GIVEUP : STALL_HUNG;
+
+                            // 阶段1：本地未自行恢复 -> 尝试强制重连
+                            if (!forcedAt[uri] && (now - stallStart[uri]) >= stallMs) {
+                                forcedAt[uri] = now;
+                                post('ws_status', '本地未自动重连，尝试强制重连: ' + uri, 'warning');
+                                forceOpen(h.m);
+                            }
+                            // 阶段2：强制重连仍不恢复 -> 刷新页面重建连接
+                            if (forcedAt[uri] && (now - forcedAt[uri]) >= FORCE_MS) {
+                                if (canReload()) {
+                                    post('ws_status', '强制重连无效，刷新页面以重建连接: ' + uri, 'error');
+                                    try { window.location.reload(); } catch(e){}
+                                } else if (!notified[uri]) {
+                                    notified[uri] = true;
+                                    post('ws_status', '自动刷新次数已达上限，请手动刷新页面恢复连接', 'error');
+                                }
+                            }
+                        });
+                    } catch(e){ post('ws_status', 'WebSocket 监控异常: ' + (e && e.message ? e.message : e), 'error'); }
+                }, 5000);
+
+                // 轻量 WebSocket 兜底监控（仅记录连接事件，便于排查；主动干预以 socket.io 为准）
+                try {
+                    var NativeWS = window.WebSocket;
+                    if (NativeWS && !window.__CPPU_WS_HOOKED__) {
+                        window.__CPPU_WS_HOOKED__ = true;
+                        var WSHook = function(url, protocols){
+                            var ws = protocols ? new NativeWS(url, protocols) : new NativeWS(url);
+                            ws.addEventListener('close', function(){ post('ws_status', 'WebSocket 连接关闭: ' + url, 'warning'); });
+                            ws.addEventListener('error', function(){ post('ws_status', 'WebSocket 连接错误: ' + url, 'warning'); });
+                            return ws;
+                        };
+                        WSHook.prototype = NativeWS.prototype;
+                        WSHook.CONNECTING = NativeWS.CONNECTING; WSHook.OPEN = NativeWS.OPEN; WSHook.CLOSING = NativeWS.CLOSING; WSHook.CLOSED = NativeWS.CLOSED;
+                        window.WebSocket = WSHook;
+                    }
+                } catch(e){}
+
+                post('ws_status', 'WebSocket/socket.io 断线监控已启动', 'info');
+            })();`;
+            document.documentElement.appendChild(script);
+            script.parentNode.removeChild(script);
+
+            // userscript 侧接收桥接消息并记录日志
+            window.addEventListener('message', function(evt) {
+                try {
+                    const d = evt.data || {};
+                    if (d && d.source === 'CPPU_WS_BRIDGE' && d.text) {
+                        const level = d.level === 'error' ? 'error' : (d.level === 'warning' ? 'warning' : 'info');
+                        addLog('[WS] ' + d.text, level);
+                        if (d.level === 'error' && typeof GM_notification !== 'undefined') {
+                            GM_notification({ title: '选课助手-连接异常', text: d.text, timeout: 5000 });
+                        }
+                    }
+                } catch (e) {}
+            }, false);
+
+            addLog('WebSocket 断线监控已启用', 'info');
+        } catch (e) {
+            addLog('注入 WebSocket 监控失败: ' + (e && e.message ? e.message : e), 'error');
+        }
+    }
+
     // 启动自动导航
     function startAutoNavigation() {
         addLog('开始自动导航到选课页面', 'info');
@@ -875,8 +1110,23 @@
         return null;
     }
 
-    // 开始自动选课
-    function startAutoSelection() {
+    // 开始自动选课（手动点击"开始选课"时先弹出筛选确认；自动恢复时跳过确认）
+    function startAutoSelection(options) {
+        if (isRunning) return;
+
+        const skipConfirm = options && options.skipConfirm === true;
+        if (!skipConfirm) {
+            addLog('开始抢课前需要确认筛选状态...', 'info');
+            showFilterConfirmModal(() => beginAutoSelection(), null);
+            return;
+        }
+
+        addLog('自动恢复选课流程（已跳过筛选确认，如需重新确认请先停止再开始）', 'warning');
+        beginAutoSelection();
+    }
+
+    // 实际启动选课流程
+    function beginAutoSelection() {
         if (isRunning) return;
 
         isRunning = true;
@@ -899,6 +1149,61 @@
                 executeSelectionProcess(clickDelayValue);
             }, 2000);
         }, refreshIntervalValue);
+    }
+
+    // 开始抢课前提醒：确认已手动完成筛选（是否与必修课冲突 / 课程模块）
+    function showFilterConfirmModal(onConfirm, onCancel) {
+        // 若已存在则先移除
+        const existing = document.getElementById('filter-confirm-modal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'filter-confirm-modal';
+        modal.innerHTML = `
+            <div class="filter-confirm-content">
+                <div class="filter-confirm-title">开始抢课前确认</div>
+                <div class="filter-confirm-body">
+                    <p>开始自动抢课前，请确认您已经<strong>手动完成筛选</strong>，否则可能抢到不想要的课程：</p>
+                    <div class="filter-confirm-item">
+                        <label><input type="checkbox" id="filter-confirm-conflict"> 我已筛选「<strong>是否与本人必修课冲突</strong>」（避免选到冲突课程）</label>
+                    </div>
+                    <div class="filter-confirm-item">
+                        <label><input type="checkbox" id="filter-confirm-module"> 我已筛选「<strong>课程模块</strong>」（避免选到其他模块的课程）</label>
+                    </div>
+                    <div class="filter-confirm-note">脚本不会自动筛选，请先在页面上手动完成筛选后再开始。</div>
+                </div>
+                <div class="filter-confirm-buttons">
+                    <button class="disclaimer-btn btn-cancel" id="filter-confirm-cancel">取消</button>
+                    <button class="disclaimer-btn btn-confirm" id="filter-confirm-ok" disabled>我已确认，开始抢课</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        const okBtn = document.getElementById('filter-confirm-ok');
+        const conflictChk = document.getElementById('filter-confirm-conflict');
+        const moduleChk = document.getElementById('filter-confirm-module');
+
+        function updateOkState() {
+            okBtn.disabled = !(conflictChk.checked && moduleChk.checked);
+            okBtn.style.opacity = okBtn.disabled ? '0.5' : '1';
+            okBtn.style.cursor = okBtn.disabled ? 'not-allowed' : 'pointer';
+        }
+        conflictChk.addEventListener('change', updateOkState);
+        moduleChk.addEventListener('change', updateOkState);
+        updateOkState();
+
+        document.getElementById('filter-confirm-cancel').addEventListener('click', function() {
+            modal.remove();
+            addLog('已取消开始抢课（筛选确认未完成）', 'warning');
+            if (onCancel) onCancel();
+        });
+        okBtn.addEventListener('click', function() {
+            if (okBtn.disabled) return;
+            modal.remove();
+            addLog('已确认完成筛选，开始抢课', 'success');
+            if (onConfirm) onConfirm();
+        });
     }
 
     // 停止自动选课
@@ -1076,36 +1381,35 @@
 
             const row = rows[i];
 
-            // 检查课容量（YL列）
-            const capacityCell = row.querySelector('.x-grid-cell-YL .x-grid-cell-inner');
-            if (!capacityCell) {
-                addLog(`警告: 第 ${i + 1} 门课程未找到课容量信息`, 'warning');
-                continue;
-            }
-
-            const capacityText = capacityCell.textContent.trim();
-            const capacity = parseInt(capacityText) || 0;
-
-            // 如果课容量为0，跳过此课程
-            if (capacity === 0) {
-                addLog(`跳过第 ${i + 1} 门课程 (课容量为0)`, 'warning');
-                skippedCount++;
-                continue;
-            }
-
-            // 查找包含"选课"文本的按钮
+            // 先查找该行的"选课"按钮：无按钮的行（轮次列表等其它表格、已选课程）直接跳过，不参与统计
             const buttons = row.querySelectorAll('.x-action-col-text');
             let selectButton = null;
-
-            // 查找包含"选课"文本的按钮
             buttons.forEach(button => {
                 if (button.textContent.includes('选课')) {
                     selectButton = button;
                 }
             });
+            if (!selectButton) continue;
+
+            // 读取"余量"（YL列）：余量 <= 0 或无法读取时跳过，避免点击没有余量的课程
+            const capacityCell = row.querySelector('.x-grid-cell-YL') || row.querySelector('.x-grid-cell-YL .x-grid-cell-inner');
+            const capacityText = capacityCell ? (capacityCell.textContent || '').trim() : '';
+            const capacityMatch = capacityText.match(/\d+/);
+            const capacity = capacityMatch ? parseInt(capacityMatch[0], 10) : null;
+
+            if (capacity === null) {
+                addLog(`警告: 第 ${i + 1} 门课程未读取到余量信息，跳过`, 'warning');
+                skippedCount++;
+                continue;
+            }
+            if (capacity <= 0) {
+                addLog(`跳过第 ${i + 1} 门课程 (余量为 ${capacity})`, 'warning');
+                skippedCount++;
+                continue;
+            }
 
             if (selectButton) {
-                addLog(`正在选择第 ${i + 1} 门课程 (容量: ${capacity})`, 'info');
+                addLog(`正在选择第 ${i + 1} 门课程 (余量: ${capacity})`, 'info');
 
                 // 模拟点击
                 selectButton.click();
@@ -1148,7 +1452,7 @@
         if (clickedCount === 0 && skippedCount === 0) {
             addLog('未找到可用的"选课"按钮', 'warning');
         } else {
-            addLog(`已尝试选择 ${clickedCount} 门课程, 跳过 ${skippedCount} 门课容量为0的课程`, 'success');
+            addLog(`已尝试选择 ${clickedCount} 门课程, 跳过 ${skippedCount} 门余量为0或余量信息不可读的课程`, 'success');
         }
     }
 
