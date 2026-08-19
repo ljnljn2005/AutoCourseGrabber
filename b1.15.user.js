@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cppu选课助手
 // @namespace    http://tampermonkey.net/
-// @version      b1.12
-// @description  cppu选课助手
+// @version      b1.16
+// @description  cppu选课助手（支持 WebVPN：webvpn.cppu.edu.cn）
 // @author       ljnljn
 // @match        http://jw.cppu.edu.cn/*
 // @match        https://jw.cppu.edu.cn/*
@@ -281,6 +281,8 @@
             font-size: 13px;
             background: white;
             pointer-events: auto !important;
+            user-select: text;
+            -webkit-user-select: text;
         }
 
         .setting-item input:focus {
@@ -339,6 +341,38 @@
             background: #fff5f5;
             border: 1px solid #f5c6cb;
             border-radius: 4px;
+        }
+
+        /* 收藏与筛选面板样式 */
+        .setting-item textarea, .setting-item select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+            background: white;
+            box-sizing: border-box;
+            pointer-events: auto !important;
+            resize: vertical;
+            user-select: text;
+            -webkit-user-select: text;
+        }
+
+        .filter-hint {
+            font-size: 11px;
+            color: #888;
+            margin-top: 3px;
+            line-height: 1.4;
+        }
+
+        .filter-summary {
+            padding: 6px 8px;
+            background: #f0f7ff;
+            border: 1px solid #d6e9ff;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #2c3e50;
+            margin-top: 8px;
         }
 
         /* 开始抢课前筛选确认弹窗 */
@@ -426,7 +460,7 @@
         // 检查用户是否已经确认过免责声明
         const disclaimerAccepted = GM_getValue('disclaimerAccepted', false);
         const acceptedVersion = GM_getValue('disclaimerVersion', '');
-        const currentVersion = 'b1.12';
+        const currentVersion = 'b1.16';
 
         // 如果用户已经接受过当前版本的免责声明，直接返回
         if (disclaimerAccepted && acceptedVersion === currentVersion) {
@@ -500,7 +534,7 @@
         startLogAutoClear();
         // 注入页面上下文的 console 捕获桥接
         injectConsoleBridge();
-        // 注入页面上下文的 WebSocket/socket.io 断线监控与强制重连
+        // 注入页面上下文的 WebSocket/socket.io 断线监控与深度强制重连（不刷新页面）
         injectWsBridge();
         // 同时尝试在 userscript 沙箱层面做一次捕获（兼容不同环境）
         startConsoleCapture();
@@ -520,7 +554,7 @@
         controlPanel.id = 'police-course-control';
         controlPanel.innerHTML = `
                 <div class="control-header">
-                <span>选课助手-版本b1.12</span>
+                <span>选课助手-版本b1.16</span>
                 <button class="close-btn" id="close-btn">×</button>
             </div>
             <div class="control-buttons">
@@ -528,6 +562,7 @@
                 <button id="start-btn" class="control-btn btn-start">开始选课</button>
                 <button id="stop-btn" class="control-btn btn-stop">停止选课</button>
                 <button id="settings-btn" class="control-btn btn-settings">设置（开发中）</button>
+                <button id="filter-btn" class="control-btn btn-settings">收藏与筛选</button>
             </div>
             <div class="settings-panel" id="settings-panel">
                 <div class="setting-item">
@@ -539,6 +574,42 @@
                     <input type="number" id="click-delay" min="100" value="500">
                 </div>
                 <button id="save-settings" class="save-settings">保存设置</button>
+            </div>
+            <div class="settings-panel" id="filter-panel">
+                <div class="setting-item">
+                    <label for="filter-modules">课程模块筛选（逗号分隔，空=全部）</label>
+                    <input type="text" id="filter-modules" placeholder="例如：公共线下课程,公共线上课程">
+                    <div class="filter-hint">可选：公共线下课程 / 公共线上课程 / 公共体育课程 / 专业任选 / 实践技能任选 / 信息素养课程 / 专业 …（留空则不过滤模块）</div>
+                </div>
+                <div class="setting-item">
+                    <label for="filter-attr">课程属性筛选</label>
+                    <select id="filter-attr">
+                        <option value="">全部</option>
+                        <option value="必修课">必修课</option>
+                        <option value="选修课">选修课</option>
+                        <option value="课外实践必修">课外实践必修</option>
+                        <option value="实践技能选修">实践技能选修</option>
+                    </select>
+                </div>
+                <div class="setting-item">
+                    <label for="filter-whitelist">白名单（每行一个 课程名/课程号/选课课号，空=不限制）</label>
+                    <textarea id="filter-whitelist" rows="2" placeholder="例如：网球高级&#10;1zc1X068K"></textarea>
+                    <div class="filter-hint">白名单非空时，只抢命中白名单的课程。</div>
+                </div>
+                <div class="setting-item">
+                    <label for="filter-blacklist">黑名单（每行一个，命中则跳过）</label>
+                    <textarea id="filter-blacklist" rows="2" placeholder="例如：闪光摄影&#10;羽毛球高级"></textarea>
+                    <div class="filter-hint">黑名单优先于白名单：命中黑名单的课程一定不抢。</div>
+                </div>
+                <div class="setting-item">
+                    <label for="filter-favorites">收藏课程 + 优先级（每行：课程名|优先级，数字越小越先抢）</label>
+                    <textarea id="filter-favorites" rows="3" placeholder="网球高级|1&#10;羽毛球高级|2&#10;文科物理|3"></textarea>
+                    <div class="filter-hint">收藏课程会排在最前面，按优先级数字从小到大抢；其余课程按原顺序。</div>
+                </div>
+                <button id="save-filter" class="save-settings">保存筛选</button>
+                <button id="preview-btn" class="save-settings" style="background:#4a69bd;">预览命中课程（不实际选课）</button>
+                <div class="filter-hint">预览会按当前筛选/黑白名单/收藏优先级列出会抢的课程和顺序，不会真的点选课。</div>
+                <div class="filter-summary" id="filter-summary">筛选未启用（全部课程）</div>
             </div>
             <div id="status" class="status-indicator status-inactive">状态: 未启动</div>
             <div class="progress-bar">
@@ -560,8 +631,11 @@
         document.getElementById('start-btn').addEventListener('click', startAutoSelection);
         document.getElementById('stop-btn').addEventListener('click', stopAutoSelection);
         document.getElementById('settings-btn').addEventListener('click', toggleSettingsPanel);
+        document.getElementById('filter-btn').addEventListener('click', toggleFilterPanel);
         document.getElementById('close-btn').addEventListener('click', closeControlPanel);
         document.getElementById('save-settings').addEventListener('click', saveSettings);
+        document.getElementById('save-filter').addEventListener('click', saveFilter);
+        document.getElementById('preview-btn').addEventListener('click', previewSelection);
 
         // 错误徽章点击切换错误详情显示
         const errorBadgeEl = document.getElementById('error-badge');
@@ -574,6 +648,8 @@
 
         // 加载保存的设置
         loadSettings();
+        loadFilter();
+        initCourseListRecorder();
 
         // 检查是否之前已启动
         if (GM_getValue('autoSelectRunning', false)) {
@@ -589,6 +665,11 @@
 
         function dragMouseDown(e) {
             e = e || window.event;
+            // 点在输入框/下拉框/按钮/链接上时，不启动拖动，也不阻止默认行为（否则无法输入/选择）
+            const t = e.target;
+            if (t && t.closest && t.closest('input, textarea, select, button, a')) {
+                return;
+            }
             e.preventDefault();
             // 获取鼠标位置
             pos3 = e.clientX;
@@ -652,6 +733,157 @@
 
         addLog('设置已保存', 'success');
         toggleSettingsPanel();
+    }
+
+    // 切换收藏与筛选面板显示
+    function toggleFilterPanel() {
+        const panel = document.getElementById('filter-panel');
+        panel.classList.toggle('active');
+    }
+
+    // 加载收藏与筛选配置
+    function loadFilter() {
+        document.getElementById('filter-modules').value = GM_getValue('filterModules', '');
+        document.getElementById('filter-attr').value = GM_getValue('filterAttr', '');
+        document.getElementById('filter-whitelist').value = GM_getValue('filterWhitelist', '');
+        document.getElementById('filter-blacklist').value = GM_getValue('filterBlacklist', '');
+        document.getElementById('filter-favorites').value = GM_getValue('filterFavorites', '');
+        updateFilterSummary();
+    }
+
+    // 保存收藏与筛选配置
+    function saveFilter() {
+        GM_setValue('filterModules', document.getElementById('filter-modules').value.trim());
+        GM_setValue('filterAttr', document.getElementById('filter-attr').value.trim());
+        GM_setValue('filterWhitelist', document.getElementById('filter-whitelist').value.trim());
+        GM_setValue('filterBlacklist', document.getElementById('filter-blacklist').value.trim());
+        GM_setValue('filterFavorites', document.getElementById('filter-favorites').value.trim());
+        updateFilterSummary();
+        addLog('筛选配置已保存', 'success');
+        toggleFilterPanel();
+    }
+
+    // 更新筛选摘要
+    function updateFilterSummary() {
+        const summary = document.getElementById('filter-summary');
+        if (!summary) return;
+        const cfg = getFilterConfig();
+        const parts = [];
+        if (cfg.modules.length) parts.push('模块:' + cfg.modules.join('/'));
+        if (cfg.attr) parts.push('属性:' + cfg.attr);
+        if (cfg.whitelist.length) parts.push('白名单' + cfg.whitelist.length + '条');
+        if (cfg.blacklist.length) parts.push('黑名单' + cfg.blacklist.length + '条');
+        if (cfg.favorites.length) parts.push('收藏' + cfg.favorites.length + '条');
+        summary.textContent = parts.length ? '筛选已启用：' + parts.join('，') : '筛选未启用（全部课程）';
+    }
+
+    // 读取课程行某个字段的单元格文本
+    function getCourseCell(row, field) {
+        const cell = row.querySelector('.x-grid-cell-' + field + ' .x-grid-cell-inner');
+        return cell ? cell.textContent.trim() : '';
+    }
+
+    // 获取课程网格的数据行（含余量 YL 列；排除选课任务列表行）
+    function getCourseGridRows() {
+        const all = document.querySelectorAll('tr.x-grid-row.x-grid-data-row');
+        return Array.from(all).filter(r => r.querySelector('.x-grid-cell-YL'));
+    }
+
+    // 解析文本列表（每行一条，忽略空行与 # 注释）
+    function parseLines(text) {
+        return String(text || '').split('\n')
+            .map(s => s.trim())
+            .filter(s => s && !s.startsWith('#'));
+    }
+
+    // 解析收藏列表：每行 "名称|优先级" 或 "名称"
+    function parseFavorites(text) {
+        return parseLines(text).map((line, idx) => {
+            const parts = line.split('|').map(s => s.trim());
+            const name = parts[0];
+            const priority = parseInt(parts[1], 10);
+            return { name, priority: isNaN(priority) ? idx : priority };
+        });
+    }
+
+    // 课程是否命中某个名称/编号（课程名、课程号、选课课号任一包含即命中）
+    function courseMatchesName(info, name) {
+        const n = name.toLowerCase();
+        return [info.bjmc, info.kch, info.xkkh].some(v => v && v.toLowerCase().includes(n));
+    }
+
+    // 获取当前筛选配置
+    function getFilterConfig() {
+        return {
+            modules: parseLines(document.getElementById('filter-modules').value).flatMap(s => s.split(/[,，、]/)).map(s => s.trim()).filter(Boolean),
+            attr: (document.getElementById('filter-attr').value || '').trim(),
+            whitelist: parseLines(document.getElementById('filter-whitelist').value),
+            blacklist: parseLines(document.getElementById('filter-blacklist').value),
+            favorites: parseFavorites(document.getElementById('filter-favorites').value),
+            onlyAvailable: true
+        };
+    }
+
+    // 判断课程是否符合筛选，返回 { pass, reason }
+    function coursePassFilter(info, cfg) {
+        if (cfg.blacklist.some(n => courseMatchesName(info, n))) return { pass: false, reason: '黑名单' };
+        if (cfg.whitelist.length && !cfg.whitelist.some(n => courseMatchesName(info, n))) return { pass: false, reason: '不在白名单' };
+        if (cfg.modules.length && !cfg.modules.includes(info.kcmk)) return { pass: false, reason: '模块不符(' + info.kcmk + ')' };
+        if (cfg.attr && info.kcsx !== cfg.attr) return { pass: false, reason: '属性不符(' + info.kcsx + ')' };
+        if (cfg.onlyAvailable && info.yl <= 0) return { pass: false, reason: '余量为0' };
+        return { pass: true, reason: '' };
+    }
+
+    // 预览模式：按当前规则列出会抢的课程及顺序，不实际点选课
+    function previewSelection() {
+        const allRows = document.querySelectorAll('tr.x-grid-row.x-grid-data-row');
+        const rows = Array.from(allRows).filter(r => r.querySelector('.x-grid-cell-YL'));
+        if (rows.length === 0) {
+            addLog('预览：未找到课程行（请先进入课程列表/计划外选课）', 'warning');
+            return;
+        }
+
+        const cfg = getFilterConfig();
+        // 读取 + 去重
+        const seen = new Set();
+        const courses = [];
+        rows.forEach((row, index) => {
+            const info = {
+                row, index,
+                bjmc: getCourseCell(row, 'BJMC'),
+                kch: getCourseCell(row, 'KCH'),
+                xkkh: getCourseCell(row, 'XKKH'),
+                kcmk: getCourseCell(row, 'KCMK'),
+                kcsx: getCourseCell(row, 'KCSX'),
+                yl: parseInt(getCourseCell(row, 'YL')) || 0,
+                xkzt: getCourseCell(row, 'XKZT')
+            };
+            const key = info.xkkh || (info.kch + '|' + info.bjmc);
+            if (seen.has(key)) return;
+            seen.add(key);
+            const fav = cfg.favorites.find(f => courseMatchesName(info, f.name));
+            info.isFav = !!fav;
+            info.priority = fav ? fav.priority : 999999;
+            courses.push(info);
+        });
+
+        // 预览时不强制要求有余量，只把余量作为标注
+        const cfgNoYl = Object.assign({}, cfg, { onlyAvailable: false });
+        const hit = [];
+        for (const c of courses) {
+            const r = coursePassFilter(c, cfgNoYl);
+            if (r.pass) hit.push(c);
+        }
+        hit.sort((a, b) => a.priority - b.priority || a.index - b.index);
+
+        const withSeat = hit.filter(c => c.yl > 0).length;
+        addLog(`预览：符合筛选共 ${hit.length} 门（有座 ${withSeat} 门，无座 ${hit.length - withSeat} 门）`, 'info');
+        for (const c of hit) {
+            const tag = c.isFav ? '★优先' + c.priority + ' ' : '';
+            const seat = c.yl > 0 ? '有座(' + c.yl + ')' : '无座';
+            addLog(`${tag}${c.bjmc || c.kch}｜模块:${c.kcmk}｜属性:${c.kcsx}｜${seat}`, c.yl > 0 ? 'success' : 'warning');
+        }
+        updateFilterSummary();
     }
 
     let isRunning = false;
@@ -902,8 +1134,8 @@
         }
     }
 
-    // 注入页面上下文：socket.io/WebSocket 断线监控与强制重连
-    // 当连接断开且页面自身不重新发送时：先尝试强制重连，仍失败则刷新页面重建连接
+    // 注入页面上下文：socket.io/WebSocket 断线监控与深度强制重连
+    // 当连接断开且页面自身不重新发送时：深度重建传输层强制重连，持续重试，绝不刷新页面
     function injectWsBridge() {
         try {
             const script = document.createElement('script');
@@ -1125,8 +1357,9 @@
         updateStatus('状态: 运行中', 'status-active');
         addLog('选课助手已启动', 'success');
 
-        // 获取设置值
-        const refreshIntervalValue = 30*1000;
+        // 获取设置值（轮询间隔：默认30秒，最低5秒）
+        const refreshIntervalSec = Math.max(5, parseInt(GM_getValue('refreshInterval', 30)) || 30);
+        const refreshIntervalValue = refreshIntervalSec * 1000;
         const clickDelayValue = GM_getValue('clickDelay', 500);
 
         // 开始选课流程
@@ -1161,7 +1394,7 @@
                     <div class="filter-confirm-item">
                         <label><input type="checkbox" id="filter-confirm-module"> 我已筛选「<strong>课程模块</strong>」（避免选到其他模块的课程）</label>
                     </div>
-                    <div class="filter-confirm-note">脚本不会自动筛选，请先在页面上手动完成筛选后再开始。</div>
+                    <div class="filter-confirm-note">脚本不会自动筛选，请先在页面上手动完成筛选后再开始。也可以在「收藏与筛选」面板里配置模块/属性/黑白名单筛选。</div>
                 </div>
                 <div class="filter-confirm-buttons">
                     <button class="disclaimer-btn btn-cancel" id="filter-confirm-cancel">取消</button>
@@ -1236,8 +1469,80 @@
         }
     }
 
+    // ===== 记住并恢复上次进入的课程列表 =====
+    let lastCourseList = null; // { taskName, actionText, actionIndex }
+
+    function loadLastCourseList() {
+        try { lastCourseList = GM_getValue('lastCourseList', null); } catch (e) { lastCourseList = null; }
+        return lastCourseList;
+    }
+
+    function recordCourseList(taskName, actionText, actionIndex) {
+        lastCourseList = { taskName, actionText, actionIndex };
+        GM_setValue('lastCourseList', lastCourseList);
+        addLog(`已记录课程列表：${taskName} → ${actionText}`, 'info');
+    }
+
+    // 捕获任务列表里点击「所有选修课/计划内选课/计划外选课」的动作，记录上下文
+    function initCourseListRecorder() {
+        document.addEventListener('click', function(evt) {
+            try {
+                const el = evt.target;
+                const action = el && el.closest ? el.closest('.x-action-col-text') : null;
+                if (!action) return;
+                const row = action.closest('tr');
+                if (!row || !row.querySelector('.x-grid-cell-XKRWMC')) return; // 只在任务列表行记录
+                const text = action.textContent.trim();
+                if (['所有选修课', '计划内选课', '计划外选课'].indexOf(text) < 0) return;
+                const taskCell = row.querySelector('.x-grid-cell-XKRWMC .x-grid-cell-inner');
+                const taskName = taskCell ? taskCell.textContent.trim() : '';
+                const acts = Array.from(action.parentNode.children).filter(c => c.classList && c.classList.contains('x-action-col-text'));
+                const actionIndex = acts.indexOf(action);
+                if (taskName) recordCourseList(taskName, text, actionIndex);
+            } catch (e) {}
+        }, true);
+    }
+
+    // 尝试重新进入上次进入的课程列表
+    function tryReenterCourseList() {
+        const last = loadLastCourseList();
+        if (!last || !last.taskName) return false;
+        const taskRows = Array.from(document.querySelectorAll('tr.x-grid-row.x-grid-data-row'))
+            .filter(r => r.querySelector('.x-grid-cell-XKRWMC'));
+        for (const row of taskRows) {
+            const cell = row.querySelector('.x-grid-cell-XKRWMC .x-grid-cell-inner');
+            const name = cell ? cell.textContent.trim() : '';
+            if (name !== last.taskName) continue;
+            let action = null;
+            row.querySelectorAll('.x-action-col-text').forEach(a => {
+                if (a.textContent.trim() === last.actionText) action = a;
+            });
+            if (!action && typeof last.actionIndex === 'number') {
+                const acts = row.querySelectorAll('.x-action-col-text');
+                action = acts[last.actionIndex] || null;
+            }
+            if (action) {
+                addLog(`重新进入课程列表：${last.taskName} → ${action.textContent.trim()}`, 'info');
+                action.click();
+                return true;
+            }
+        }
+        return false;
+    }
+
     // 执行选课流程
     function executeSelectionProcess(clickDelay) {
+        // 不在课程列表时，尝试恢复上次进入的课程列表
+        if (getCourseGridRows().length === 0) {
+            addLog('未检测到课程列表，尝试恢复上次进入的课程列表...', 'warning');
+            if (tryReenterCourseList()) {
+                currentProcess = setTimeout(() => executeSelectionProcess(clickDelay), 4000);
+            } else {
+                addLog('无法自动恢复课程列表（请手动进入一次选课列表，脚本会记住）', 'error');
+            }
+            return;
+        }
+
         // 1. 获取总课程数
         const totalCourses = getTotalCourses();
         if (!totalCourses) {
@@ -1348,103 +1653,126 @@
         }
     }
 
-    // 点击所有"选课"按钮（智能顺序选择）
+    // 点击符合条件的"选课"按钮（收藏优先 + 黑白名单 + 筛选）
     async function clickAllSelectButtons(clickDelay) {
-        const rows = document.querySelectorAll('tr.x-grid-row.x-grid-data-row');
-        let clickedCount = 0;
-        let skippedCount = 0;
+        // 只处理课程网格的行（含余量 YL 列），排除选课任务列表行
+        const allRows = document.querySelectorAll('tr.x-grid-row.x-grid-data-row');
+        const rows = Array.from(allRows).filter(r => r.querySelector('.x-grid-cell-YL'));
 
         if (rows.length === 0) {
-            addLog('未找到课程行', 'warning');
+            addLog('未找到课程行（请先进入「计划外选课」或含课程列表的页面）', 'warning');
             return;
         }
 
-        addLog(`找到 ${rows.length} 门课程`, 'info');
+        const cfg = getFilterConfig();
+        addLog(`读取到 ${rows.length} 门课程，开始按筛选规则匹配...`, 'info');
 
-        // 创建弹窗观察器
+        // 解析每门课程信息（按选课课号去重，防止同一课程在两个网格中重复出现）
+        const seen = new Set();
+        const courses = [];
+        rows.forEach((row, index) => {
+            const info = {
+                row,
+                index,
+                bjmc: getCourseCell(row, 'BJMC'),   // 听课教学班（如 网球高级）
+                kch: getCourseCell(row, 'KCH'),     // 课程编号
+                xkkh: getCourseCell(row, 'XKKH'),   // 选课课号
+                kcmk: getCourseCell(row, 'KCMK'),   // 课程模块（公共线下课程等）
+                kcsx: getCourseCell(row, 'KCSX'),   // 课程属性（选修课等）
+                yl: parseInt(getCourseCell(row, 'YL')) || 0, // 余量
+                xkzt: getCourseCell(row, 'XKZT'),   // 选课状态（未选/已选）
+                teacher: getCourseCell(row, 'SKLSMC')
+            };
+            const key = info.xkkh || (info.kch + '|' + info.bjmc);
+            if (seen.has(key)) return;
+            seen.add(key);
+            const fav = cfg.favorites.find(f => courseMatchesName(info, f.name));
+            info.isFav = !!fav;
+            info.priority = fav ? fav.priority : 999999;
+            courses.push(info);
+        });
+
+        // 应用筛选
+        const eligible = [];
+        const skipped = [];
+        for (const c of courses) {
+            const r = coursePassFilter(c, cfg);
+            if (r.pass) eligible.push(c);
+            else skipped.push({ c, reason: r.reason });
+        }
+
+        updateFilterSummary();
+        addLog(`筛选结果：符合条件 ${eligible.length} 门，跳过 ${skipped.length} 门`, 'info');
+        for (const s of skipped) {
+            const label = s.c.bjmc || s.c.kch || ('第' + (s.c.index + 1) + '门');
+            addLog(`跳过 ${label}（${s.reason}）`, 'warning');
+        }
+
+        // 收藏优先（优先级数字小在前），其余保持原顺序
+        eligible.sort((a, b) => a.priority - b.priority || a.index - b.index);
+
+        if (eligible.length === 0) {
+            addLog('没有符合条件的课程可抢', 'warning');
+            return;
+        }
+
+        // 创建弹窗观察器 + 消息观察器
         createPopupObserver();
-
-        // 创建消息观察器
         createMessageObserver();
 
-        for (let i = 0; i < rows.length; i++) {
+        let clickedCount = 0;
+        let noButtonCount = 0;
+        for (const c of eligible) {
             if (!isRunning) break;
 
-            const row = rows[i];
+            const label = c.bjmc || c.kch || ('第' + (c.index + 1) + '门');
 
-            // 先查找该行的"选课"按钮：无按钮的行（轮次列表等其它表格、已选课程）直接跳过，不参与统计
-            const buttons = row.querySelectorAll('.x-action-col-text');
+            // 精确找"选课"按钮（排除"退选"）
             let selectButton = null;
-            buttons.forEach(button => {
-                if (button.textContent.includes('选课')) {
-                    selectButton = button;
-                }
+            c.row.querySelectorAll('.x-action-col-text').forEach(btn => {
+                if (btn.textContent.trim() === '选课') selectButton = btn;
             });
-            if (!selectButton) continue;
 
-            // 读取"余量"（YL列）：余量 <= 0 或无法读取时跳过，避免点击没有余量的课程
-            const capacityCell = row.querySelector('.x-grid-cell-YL') || row.querySelector('.x-grid-cell-YL .x-grid-cell-inner');
-            const capacityText = capacityCell ? (capacityCell.textContent || '').trim() : '';
-            const capacityMatch = capacityText.match(/\d+/);
-            const capacity = capacityMatch ? parseInt(capacityMatch[0], 10) : null;
-
-            if (capacity === null) {
-                addLog(`警告: 第 ${i + 1} 门课程未读取到余量信息，跳过`, 'warning');
-                skippedCount++;
-                continue;
-            }
-            if (capacity <= 0) {
-                addLog(`跳过第 ${i + 1} 门课程 (余量为 ${capacity})`, 'warning');
-                skippedCount++;
+            if (!selectButton) {
+                noButtonCount++;
+                addLog(`${label} 未找到"选课"按钮（可能已选或该视图不能选）`, 'warning');
                 continue;
             }
 
-            if (selectButton) {
-                addLog(`正在选择第 ${i + 1} 门课程 (余量: ${capacity})`, 'info');
+            addLog(`正在选择 ${label}（模块:${c.kcmk} 属性:${c.kcsx} 余量:${c.yl}${c.isFav ? ' ★收藏优先' : ''}）`, 'info');
 
-                // 模拟点击
-                selectButton.click();
-                clickedCount++;
+            // 模拟点击
+            selectButton.click();
+            clickedCount++;
 
-                // 模拟鼠标悬停效果
-                selectButton.style.backgroundColor = '#4CAF50';
-                selectButton.style.color = 'white';
+            // 高亮反馈
+            selectButton.style.backgroundColor = '#4CAF50';
+            selectButton.style.color = 'white';
+            setTimeout(() => {
+                selectButton.style.backgroundColor = '';
+                selectButton.style.color = '';
+            }, 500);
 
-                // 恢复原始样式
-                setTimeout(() => {
-                    selectButton.style.backgroundColor = '';
-                    selectButton.style.color = '';
-                }, 500);
-
-                // 创建新的消息Promise
-                const messagePromise = createMessagePromise();
-
-                // 等待选课成功消息或超时
-                try {
-                    addLog('等待选课成功消息...', 'info');
-                    updateMessageMonitor('等待选课成功消息');
-
-                    // 设置超时时间（10秒）
-                    await Promise.race([
-                        messagePromise,
-                        new Promise(resolve => setTimeout(resolve, 10000))
-                    ]);
-
-                    addLog(`第 ${i + 1} 门课程选课成功`, 'success');
-
-                    // 等待基础延迟
-                    await new Promise(resolve => setTimeout(resolve, clickDelay));
-                } catch (error) {
-                    addLog(`第 ${i + 1} 门课程选课可能未成功`, 'warning');
-                }
+            // 等待选课成功消息或超时
+            const messagePromise = createMessagePromise();
+            try {
+                addLog('等待选课成功消息...', 'info');
+                updateMessageMonitor('等待选课成功消息');
+                await Promise.race([
+                    messagePromise,
+                    new Promise(resolve => setTimeout(resolve, 10000))
+                ]);
+                addLog(`${label} 选课操作已完成`, 'success');
+                updateMessageMonitor('已操作');
+            } catch (error) {
+                addLog(`${label} 选课可能未成功`, 'warning');
             }
+
+            // 点击间隔
+            await new Promise(resolve => setTimeout(resolve, clickDelay));
         }
 
-        if (clickedCount === 0 && skippedCount === 0) {
-            addLog('未找到可用的"选课"按钮', 'warning');
-        } else {
-            addLog(`已尝试选择 ${clickedCount} 门课程, 跳过 ${skippedCount} 门余量为0或余量信息不可读的课程`, 'success');
-        }
+        addLog(`本次已尝试选择 ${clickedCount} 门课程，未找到按钮 ${noButtonCount} 门`, 'success');
     }
 
     // 创建弹窗观察器
