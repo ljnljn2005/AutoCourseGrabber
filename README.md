@@ -1,4 +1,6 @@
-# AutoCourseGrabber
+# AutoCourseGrabber     
+# 因为亲身经历，所以更懂痛苦点  
+
 喜欢的话能不能点亮右上角的小星星喵~
 
 这是Beta版本，所以可能不稳定，请在Issue板块提交Bug说明。
